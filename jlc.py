@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import json
@@ -13,8 +14,15 @@ from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# 全局变量用于收集总结日志
+in_summary = False
+summary_logs = []
+
 def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    full_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    print(full_msg, flush=True)
+    if in_summary:
+        summary_logs.append(msg)  # 只收集纯消息，无时间戳
 
 def format_nickname(nickname):
     """格式化昵称，只显示第一个字和最后一个字，中间用星号代替"""
@@ -123,38 +131,47 @@ def extract_secretkey_from_devtools(driver):
     
     return secretkey
 
-@with_retry
 def get_oshwhub_points(driver, account_index):
     """获取开源平台积分数量"""
-    try:
-        # 获取当前页面的Cookie
-        cookies = driver.get_cookies()
-        cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # 获取当前页面的Cookie
+            cookies = driver.get_cookies()
+            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+            
+            headers = {
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'accept': 'application/json, text/plain, */*',
+                'cookie': cookie_str
+            }
+            
+            # 调用用户信息API获取积分
+            response = requests.get("https://oshwhub.com/api/users", headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data and data.get('success'):
+                    points = data.get('result', {}).get('points', 0)
+                    return points
+        except Exception:
+            pass  # 静默重试
         
-        headers = {
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'accept': 'application/json, text/plain, */*',
-            'cookie': cookie_str
-        }
-        
-        # 调用用户信息API获取积分
-        response = requests.get("https://oshwhub.com/api/users", headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data and data.get('success'):
-                points = data.get('result', {}).get('points', 0)
-                return points
-        
-        log(f"账号 {account_index} - ⚠ 无法获取积分信息")
-        return 0
-    except Exception as e:
-        log(f"账号 {account_index} - ⚠ 获取积分失败: {e}")
-        return 0
+        # 重试前刷新页面
+        if attempt < max_retries - 1:
+            try:
+                driver.refresh()
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                time.sleep(1 + random.uniform(0, 1))
+            except:
+                pass
+    
+    log(f"账号 {account_index} - ⚠ 无法获取积分信息")
+    return 0
 
 class JLCClient:
     """调用嘉立创接口"""
     
-    def __init__(self, access_token, secretkey, account_index):
+    def __init__(self, access_token, secretkey, account_index, driver):
         self.base_url = "https://m.jlc.com"
         self.headers = {
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -165,6 +182,7 @@ class JLCClient:
             'Referer': 'https://m.jlc.com/mapp/pages/my/index',
         }
         self.account_index = account_index
+        self.driver = driver
         self.message = ""
         self.initial_jindou = 0  # 签到前金豆数量
         self.final_jindou = 0    # 签到后金豆数量
@@ -203,18 +221,36 @@ class JLCClient:
             log(f"账号 {self.account_index} - ❌ 获取用户信息失败: {error_msg}")
             return False
     
-    @with_retry
     def get_points(self):
         """获取金豆数量"""
         url = f"{self.base_url}/api/activity/front/getCustomerIntegral"
-        data = self.send_request(url)
+        max_retries = 5
+        for attempt in range(max_retries):
+            data = self.send_request(url)
+            
+            if data and data.get('success'):
+                jindou_count = data.get('data', {}).get('integralVoucher', 0)
+                return jindou_count
+            
+            # 重试前刷新页面，重新提取 token 和 secretkey
+            if attempt < max_retries - 1:
+                try:
+                    self.driver.get("https://m.jlc.com/")
+                    self.driver.refresh()
+                    WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    time.sleep(1 + random.uniform(0, 1))
+                    navigate_and_interact_m_jlc(self.driver, self.account_index)
+                    access_token = extract_token_from_local_storage(self.driver)
+                    secretkey = extract_secretkey_from_devtools(self.driver)
+                    if access_token:
+                        self.headers['x-jlc-accesstoken'] = access_token
+                    if secretkey:
+                        self.headers['secretkey'] = secretkey
+                except:
+                    pass  # 静默继续
         
-        if data and data.get('success'):
-            jindou_count = data.get('data', {}).get('integralVoucher', 0)
-            return jindou_count
-        else:
-            log(f"账号 {self.account_index} - ❌ 获取金豆数量失败")
-            return 0
+        log(f"账号 {self.account_index} - ❌ 获取金豆数量失败")
+        return 0
     
     def check_sign_status(self):
         """检查签到状态"""
@@ -842,7 +878,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         if access_token and secretkey:
             log(f"账号 {account_index} - ✅ 成功提取 token 和 secretkey")
             
-            jlc_client = JLCClient(access_token, secretkey, account_index)
+            jlc_client = JLCClient(access_token, secretkey, account_index, driver)
             jindou_success = jlc_client.execute_full_process()
             
             # 记录金豆签到结果
@@ -1035,7 +1071,107 @@ def execute_final_retry_for_failed_accounts(all_results, usernames, passwords, t
     log("✅ 最终重试完成")
     return all_results
 
+# 推送函数
+def push_summary():
+    if not summary_logs:
+        return
+    
+    title = "嘉立创签到总结"
+    text = "\n".join(summary_logs)
+    full_text = f"{title}\n{text}"  # 有些平台不需要单独标题
+    
+    # Telegram
+    telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    if telegram_bot_token and telegram_chat_id:
+        try:
+            url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
+            params = {'chat_id': telegram_chat_id, 'text': full_text}
+            response = requests.get(url, params=params)
+            if response.status_code == 200:
+                log("Telegram-日志已推送")
+        except:
+            pass  # 静默失败
+
+    # 企业微信 (WeChat Work)
+    wechat_webhook_key = os.getenv('WECHAT_WEBHOOK_KEY')
+    if wechat_webhook_key:
+        try:
+            if wechat_webhook_key.startswith('https://'):
+                url = wechat_webhook_key
+            else:
+                url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={wechat_webhook_key}"
+            body = {"msgtype": "text", "text": {"content": full_text}}
+            response = requests.post(url, json=body)
+            if response.status_code == 200:
+                log("企业微信-日志已推送")
+        except:
+            pass
+
+    # 钉钉 (DingTalk)
+    dingtalk_webhook = os.getenv('DINGTALK_WEBHOOK')
+    if dingtalk_webhook:
+        try:
+            if dingtalk_webhook.startswith('https://'):
+                url = dingtalk_webhook
+            else:
+                url = f"https://oapi.dingtalk.com/robot/send?access_token={dingtalk_webhook}"
+            body = {"msgtype": "text", "text": {"content": full_text}}
+            response = requests.post(url, json=body)
+            if response.status_code == 200:
+                log("钉钉-日志已推送")
+        except:
+            pass
+
+    # PushPlus
+    pushplus_token = os.getenv('PUSHPLUS_TOKEN')
+    if pushplus_token:
+        try:
+            url = "http://www.pushplus.plus/send"
+            body = {"token": pushplus_token, "title": title, "content": text}
+            response = requests.post(url, json=body)
+            if response.status_code == 200:
+                log("PushPlus-日志已推送")
+        except:
+            pass
+
+    # Server酱
+    serverchan_sckey = os.getenv('SERVERCHAN_SCKEY')
+    if serverchan_sckey:
+        try:
+            url = f"https://sctapi.ftqq.com/{serverchan_sckey}.send"
+            body = {"title": title, "desp": text}
+            response = requests.post(url, data=body)
+            if response.status_code == 200:
+                log("Server酱-日志已推送")
+        except:
+            pass
+
+    # 酷推 (CoolPush)
+    coolpush_skey = os.getenv('COOLPUSH_SKEY')
+    if coolpush_skey:
+        try:
+            url = f"https://push.xuthus.cc/send/{coolpush_skey}?c={full_text}"
+            response = requests.get(url)
+            if response.status_code == 200:
+                log("酷推-日志已推送")
+        except:
+            pass
+
+    # 自定义API
+    custom_webhook = os.getenv('CUSTOM_WEBHOOK')
+    if custom_webhook:
+        try:
+            body = {"title": title, "content": text}
+            response = requests.post(custom_webhook, json=body)
+            if response.status_code == 200:
+                log("自定义API-日志已推送")
+        except:
+            pass
+
 def main():
+    global in_summary
+    
     if len(sys.argv) < 3:
         print("用法: python jlc.py 账号1,账号2,账号3... 密码1,密码2,密码3... [失败退出标志]")
         print("示例: python jlc.py user1,user2,user3 pwd1,pwd2,pwd3")
@@ -1081,6 +1217,7 @@ def main():
     
     # 输出详细总结
     log("=" * 70)
+    in_summary = True  # 启用总结收集
     log("📊 详细签到任务完成总结")
     log("=" * 70)
     
@@ -1182,6 +1319,9 @@ def main():
         log("  🎉 所有账号全部签到成功!")
     
     log("=" * 70)
+    
+    # 推送总结
+    push_summary()
     
     # 根据失败退出标志决定退出码
     if enable_failure_exit and failed_accounts:
