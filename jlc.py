@@ -1223,6 +1223,25 @@ def push_summary():
         except:
             pass
 
+    # Server酱3
+    serverchan3_sckey = os.getenv('SERVERCHAN3_SCKEY')  # 使用新的环境变量名
+    if serverchan3_sckey:
+        try:
+            # 新版 Server 酱调用方式
+            titleser = title
+            desp = text  
+            options = {"tags": "嘉立创|签到"}  # 可选参数，根据需求添加
+            
+            response = sc_send(serverchan3_sckey, titleser, desp, options)
+            
+            if response.get("code") == 0:  # 新版成功返回 code=0
+                log("Server酱3-日志已推送")
+            else:
+                log(f"Server酱推送失败: {response.get('message')}")
+                
+        except Exception as e:
+            log(f"Server酱推送异常: {str(e)}")    
+
     # 酷推 (CoolPush)
     coolpush_skey = os.getenv('COOLPUSH_SKEY')
     if coolpush_skey:
