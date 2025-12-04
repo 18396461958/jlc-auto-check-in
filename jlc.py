@@ -1234,6 +1234,7 @@ def push_summary():
             options = {"tags": "嘉立创|签到"}  # 可选参数，根据需求添加
             
             response = sc_send(serverchan3_sckey, titleser, desp, options)
+            print(response)
             
             if response.get("code") == 0:  # 新版成功返回 code=0
                 log("Server酱3-日志已推送")
